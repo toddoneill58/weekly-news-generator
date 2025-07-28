@@ -1,0 +1,17 @@
+{
+  "name": "weekly-news-generator",
+  "version": "1.0.0",
+  "description": "Automated weekly news feed generator for MTSU Digital Media courses",
+  "main": "weekly-news-generator.js",
+  "scripts": {
+    "start": "node weekly-news-generator.js",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.7",
+    "xml2js": "^0.4.23"
+  },
+  "author": "Todd O'Neill",
+  "license": "MIT"
+}
+Add automation scripts
