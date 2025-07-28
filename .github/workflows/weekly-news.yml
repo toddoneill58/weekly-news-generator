@@ -1,30 +1,175 @@
-name: Weekly News Feed Generator
+const fetch = require('node-fetch');
+const xml2js = require('xml2js');
 
-on:
-  schedule:
-    - cron: '0 8 * * 1'  # Every Monday at 8 AM UTC
-  workflow_dispatch:     # Allow manual triggering
+// Configuration
+const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://toddoneill.com';
+const WORDPRESS_USERNAME = process.env.WORDPRESS_USERNAME;
+const WORDPRESS_PASSWORD = process.env.WORDPRESS_PASSWORD;
+const POST_CATEGORY = process.env.POST_CATEGORY || 'Media Updates';
+const RELEVANCE_THRESHOLD = 0.75;
 
-jobs:
-  generate-news:
-    runs-on: ubuntu-latest
+// RSS Feeds from your OPML file
+const RSS_FEEDS = [
+  { title: 'Technology Law', url: 'http://feeds.feedburner.com/JotwellCyberlaw', category: 'digital-media-law' },
+  { title: 'EFF Deeplinks', url: 'http://www.eff.org/rss/updates.xml', category: 'digital-media-law' },
+  { title: 'Nieman Lab', url: 'http://www.niemanlab.org/feed/', category: 'professional-practice' },
+  { title: 'The Verge', url: 'http://www.theverge.com/rss/full.xml', category: 'media-survey' },
+  { title: 'Wired', url: 'http://feeds.wired.com/wired/index', category: 'media-survey' }
+];
+
+const courses = {
+  'digital-media-law': {
+    name: 'Digital Media Law',
+    keywords: ["copyright","fair use","DMCA","platform liability","content moderation","free speech","TikTok lawsuit","YouTube copyright strike","Instagram content removal","social media regulation","section 230","first amendment","privacy law","data protection"]
+  },
+  'professional-practice': {
+    name: 'Professional Practice', 
+    keywords: ["journalism career","creator economy","influencer marketing","brand partnerships","content strategy","social media management","portfolio development","media jobs","freelance","networking","personal brand","digital marketing"]
+  },
+  'media-survey': {
+    name: 'Media Survey',
+    keywords: ["streaming wars","social media trends","AI content creation","video game industry","podcast growth","music streaming","entertainment news","media technology","virtual reality","augmented reality","metaverse","digital transformation"]
+  }
+};
+
+async function fetchRSSFeed(feedUrl) {
+  try {
+    const response = await fetch(feedUrl);
+    const xmlText = await response.text();
+    const parser = new xml2js.Parser();
+    const result = await parser.parseStringPromise(xmlText);
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    const items = result.rss?.channel?.[0]?.item || result.feed?.entry || [];
+    
+    return items.slice(0, 5).map(item => ({
+      title: item.title?.[0]?._ || item.title?.[0] || 'No title',
+      summary: (item.description?.[0] || item.summary?.[0] || '').replace(/<[^>]*>/g, '').substring(0, 300) + '...',
+      url: item.link?.[0]?.$ ? item.link[0].$.href : item.link?.[0] || '',
+      date: new Date(item.pubDate?.[0] || item.published?.[0] || Date.now()).toISOString(),
+      source: feedUrl
+    }));
+  } catch (error) {
+    console.error(`Failed to fetch RSS feed ${feedUrl}:`, error);
+    return [];
+  }
+}
+
+function categorizeArticle(article) {
+  const articleText = (article.title + ' ' + article.summary).toLowerCase();
+  
+  let bestMatch = 'media-survey';
+  let highestScore = 0;
+  
+  Object.entries(courses).forEach(([courseKey, course]) => {
+    const score = course.keywords.reduce((acc, keyword) => {
+      const matches = (articleText.match(new RegExp(keyword.toLowerCase(), 'g')) || []).length;
+      return acc + matches;
+    }, 0);
+    
+    if (score > highestScore) {
+      highestScore = score;
+      bestMatch = courseKey;
+    }
+  });
+  
+  return { ...article, course: bestMatch, relevanceScore: Math.min(highestScore / 3 + 0.3, 1) };
+}
+
+async function generateWeeklyPost() {
+  console.log('Fetching articles from RSS feeds...');
+  
+  const allArticles = [];
+  
+  for (const feed of RSS_FEEDS) {
+    const articles = await fetchRSSFeed(feed.url);
+    const categorizedArticles = articles.map(article => categorizeArticle({
+      ...article,
+      source: feed.title
+    }));
+    allArticles.push(...categorizedArticles);
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const relevantArticles = allArticles.filter(article => 
+    new Date(article.date) > weekAgo && article.relevanceScore >= RELEVANCE_THRESHOLD
+  );
+  
+  let postHTML = `<h1>Daily Media Update - ${new Date().toLocaleDateString()}</h1>\n\n`;
+  postHTML += `<p><em>High-relevance news and insights for MTSU Digital Media students</em></p>\n\n`;
+  
+  Object.keys(courses).forEach(courseKey => {
+    const courseArticles = relevantArticles.filter(article => article.course === courseKey);
+    if (courseArticles.length > 0) {
+      const course = courses[courseKey];
       
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
-        
-    - name: Install dependencies
-      run: npm install
+      postHTML += `<h2>${course.name}</h2>\n\n`;
       
-    - name: Generate and post weekly update
-      run: node weekly-news-generator.js
-      env:
-        WORDPRESS_URL: ${{ secrets.WORDPRESS_URL }}
-        WORDPRESS_USERNAME: ${{ secrets.WORDPRESS_USERNAME }}
-        WORDPRESS_PASSWORD: ${{ secrets.WORDPRESS_PASSWORD }}
-        POST_CATEGORY: ${{ secrets.POST_CATEGORY }}
+      courseArticles.slice(0, 5).forEach(article => {
+        postHTML += `<h3><a href="${article.url}" target="_blank">${article.title}</a></h3>\n`;
+        postHTML += `<p><strong>Source:</strong> ${article.source} | <strong>Date:</strong> ${new Date(article.date).toLocaleDateString()}</p>\n`;
+        postHTML += `<p>${article.summary}</p>\n`;
+        postHTML += `<hr>\n\n`;
+      });
+    }
+  });
+  
+  postHTML += `\n<p><small><em>This update was automatically generated from RSS feeds. Only articles with ${Math.round(RELEVANCE_THRESHOLD * 100)}%+ relevance are included.</em></small></p>`;
+  
+  return postHTML;
+}
+
+async function postToWordPress(content) {
+  const postTitle = `Daily Media Update - ${new Date().toLocaleDateString()}`;
+  
+  const postData = {
+    title: postTitle,
+    content: content,
+    status: 'publish',
+    categories: [POST_CATEGORY]
+  };
+  
+  const auth = Buffer.from(`${WORDPRESS_USERNAME}:${WORDPRESS_PASSWORD}`).toString('base64');
+  
+  const response = await fetch(`${WORDPRESS_URL}/wp-json/wp/v2/posts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${auth}`
+    },
+    body: JSON.stringify(postData)
+  });
+  
+  if (response.ok) {
+    const result = await response.json();
+    console.log(`Successfully posted to WordPress! Post ID: ${result.id}`);
+    return result;
+  } else {
+    throw new Error(`WordPress API error: ${response.status}`);
+  }
+}
+
+async function main() {
+  try {
+    console.log('Starting daily news generation...');
+    const content = await generateWeeklyPost();
+    
+    if (WORDPRESS_USERNAME && WORDPRESS_PASSWORD) {
+      await postToWordPress(content);
+      console.log('Daily update posted successfully!');
+    } else {
+      console.log('WordPress credentials not provided, content generated only:');
+      console.log(content);
+    }
+  } catch (error) {
+    console.error('Error generating daily update:', error);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { generateWeeklyPost, postToWordPress };
