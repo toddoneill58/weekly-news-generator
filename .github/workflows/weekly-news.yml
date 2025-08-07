@@ -2,7 +2,7 @@ name: Daily News Feed Generator
 
 on:
   schedule:
-    - cron: '0 12 * * 1-4'  # Monday-Thursday at 7 AM Central (12 PM UTC)
+ #   - cron: '0 12 * * 1-4'  # Monday-Thursday at 7 AM Central (12 PM UTC)
   workflow_dispatch:
 
 jobs:
